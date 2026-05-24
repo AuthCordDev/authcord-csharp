@@ -173,6 +173,111 @@ public sealed class AuthCordClient : IDisposable
     }
 
     /// <summary>
+    /// Single heartbeat check — returns whether the user's session is
+    /// still live. Pass <paramref name="sessionToken"/> (DeviceSession
+    /// flow) OR both <paramref name="discordId"/> and
+    /// <paramref name="hwid"/> (validate-only flow). The endpoint is
+    /// cheap and rate-limited to ~2/sec/IP on the server side; intended
+    /// to be called every few seconds from your app's main loop.
+    /// </summary>
+    public async Task<HeartbeatResult> HeartbeatAsync(
+        string appId,
+        string? discordId = null,
+        string? hwid = null,
+        string? sessionToken = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(sessionToken) && (string.IsNullOrEmpty(discordId) || string.IsNullOrEmpty(hwid)))
+        {
+            throw new ArgumentException("Provide sessionToken, or both discordId and hwid");
+        }
+
+        var body = new Dictionary<string, object> { ["app_id"] = appId };
+        if (!string.IsNullOrEmpty(sessionToken)) body["session_token"] = sessionToken;
+        if (!string.IsNullOrEmpty(discordId)) body["discord_id"] = discordId;
+        if (!string.IsNullOrEmpty(hwid)) body["hwid"] = hwid;
+
+        return await RequestAsync<HeartbeatResult>(
+            HttpMethod.Post, "/api/v1/auth/heartbeat", body, cancellationToken);
+    }
+
+    /// <summary>
+    /// Start a background heartbeat loop. Invokes
+    /// <paramref name="onTerminated"/> exactly once when the server
+    /// returns <c>Valid=false</c> (admin clicked Terminate, user banned,
+    /// product expired, ...) and then completes. Your app should use the
+    /// callback to log the user out / return to the login screen.
+    ///
+    /// The returned <see cref="Task"/> represents the background work and
+    /// completes when the loop ends (termination or cancellation).
+    /// Cancel via <paramref name="cancellationToken"/> on normal sign-out.
+    ///
+    /// <para>Network errors are passed to <paramref name="onError"/> and
+    /// the loop keeps running. The server's <c>next_heartbeat_in</c>
+    /// value controls the cadence unless <paramref name="intervalSeconds"/>
+    /// is pinned by the caller.</para>
+    /// </summary>
+    public Task StartHeartbeatAsync(
+        string appId,
+        Func<HeartbeatResult, Task> onTerminated,
+        string? discordId = null,
+        string? hwid = null,
+        string? sessionToken = null,
+        int? intervalSeconds = null,
+        Func<Exception, Task>? onError = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(sessionToken) && (string.IsNullOrEmpty(discordId) || string.IsNullOrEmpty(hwid)))
+        {
+            throw new ArgumentException("Provide sessionToken, or both discordId and hwid");
+        }
+
+        return Task.Run(async () =>
+        {
+            int wait = intervalSeconds ?? 10;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(wait), cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                HeartbeatResult result;
+                try
+                {
+                    result = await HeartbeatAsync(appId, discordId, hwid, sessionToken, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (onError != null)
+                    {
+                        try { await onError(ex); } catch { /* swallow user errors */ }
+                    }
+                    continue;
+                }
+
+                if (!result.Valid)
+                {
+                    try { await onTerminated(result); } catch { /* swallow user errors */ }
+                    return;
+                }
+
+                if (intervalSeconds == null)
+                {
+                    wait = Math.Max(1, result.NextHeartbeatIn);
+                }
+            }
+        }, cancellationToken);
+    }
+
+    /// <summary>
     /// Revoke all sessions for a user in an app. Returns the count of sessions revoked.
     /// </summary>
     public async Task<int> RevokeAllSessionsAsync(

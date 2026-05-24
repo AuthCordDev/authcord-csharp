@@ -49,6 +49,35 @@ var offlineToken = await client.GetOfflineTokenAsync("your_app_id", discordId: "
 Console.WriteLine($"Offline token expires: {offlineToken.ExpiresAt}");
 ```
 
+## Real-time Session Kick (Heartbeat)
+
+After `ValidateAsync()` succeeds, start a background heartbeat so an admin clicking **Terminate** in the dashboard takes effect within ~10 seconds instead of waiting for the user's next manual validate.
+
+```csharp
+using var cts = new CancellationTokenSource();
+
+var heartbeatTask = client.StartHeartbeatAsync(
+    appId: "your_app_id",
+    discordId: "123456789",
+    hwid: "HWID-ABC",
+    onTerminated: hb =>
+    {
+        Console.Error.WriteLine($"Session ended: {hb.Reason}"); // "terminated", "banned", "expired", ...
+        // Tear down: close windows, clear in-memory secrets, redirect to login, etc.
+        Environment.Exit(0);
+        return Task.CompletedTask;
+    },
+    // onError: ex => ...                  // optional; loop keeps running on transient errors
+    // intervalSeconds: 10,                // optional; otherwise the server controls cadence
+    cancellationToken: cts.Token);
+
+// ... your app does its thing ...
+cts.Cancel();              // clean shutdown on normal sign-out
+await heartbeatTask;
+```
+
+For a DeviceSession-based flow, pass `sessionToken:` instead of `discordId:` + `hwid:`. Full runnable example in `examples/HeartbeatExample.cs`.
+
 ## Email-Based Validation
 
 AuthCord supports validating users by Discord ID, user ID, or email:

@@ -225,6 +225,26 @@ public sealed record Session
 }
 
 /// <summary>
+/// Result of a single heartbeat check. <c>Valid</c> is false when an admin
+/// has terminated the device/session, the user has been banned/paused,
+/// the product expired, or the HWID was unbound. <c>Reason</c> carries a
+/// machine-readable code (e.g. <c>"terminated"</c>, <c>"banned"</c>,
+/// <c>"expired"</c>) so the client can branch on it. <c>NextHeartbeatIn</c>
+/// is server-controlled and the auto-heartbeat loop honours it.
+/// </summary>
+public sealed record HeartbeatResult
+{
+    [JsonPropertyName("valid")]
+    public bool Valid { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+
+    [JsonPropertyName("next_heartbeat_in")]
+    public int NextHeartbeatIn { get; init; } = 10;
+}
+
+/// <summary>
 /// Internal wrapper for session list responses.
 /// </summary>
 internal sealed record SessionListResponse
