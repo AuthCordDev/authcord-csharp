@@ -225,6 +225,49 @@ public sealed record Session
 }
 
 /// <summary>
+/// Structured HWID components the SDK can send alongside (or instead
+/// of) an opaque HWID string. The server hashes a subset of these —
+/// controlled by the app's HWID Strategy in the dashboard — into the
+/// canonical HWID used for slot matching.
+///
+/// Typical temp HWID spoofers (used to evade FiveM-style server bans)
+/// change SMBIOS UUID, disk serial, MAC, and MachineGuid — but NOT
+/// the Windows User SID or CPUID. Apps using <c>STABLE</c> hash only
+/// (sid + cpu_id) so users stay bound across spoofs.
+///
+/// On Windows, <see cref="AuthCordClient.CollectHwidComponents"/>
+/// populates Sid + CpuId + MachineGuid automatically.
+/// </summary>
+public sealed record HwidComponents
+{
+    [JsonPropertyName("sid")]
+    public string? Sid { get; init; }
+
+    [JsonPropertyName("cpu_id")]
+    public string? CpuId { get; init; }
+
+    [JsonPropertyName("machine_guid")]
+    public string? MachineGuid { get; init; }
+
+    [JsonPropertyName("mac")]
+    public string? Mac { get; init; }
+
+    [JsonPropertyName("disk")]
+    public string? Disk { get; init; }
+
+    internal Dictionary<string, string> ToBody()
+    {
+        var d = new Dictionary<string, string>();
+        if (!string.IsNullOrEmpty(Sid))          d["sid"]          = Sid!;
+        if (!string.IsNullOrEmpty(CpuId))        d["cpu_id"]       = CpuId!;
+        if (!string.IsNullOrEmpty(MachineGuid))  d["machine_guid"] = MachineGuid!;
+        if (!string.IsNullOrEmpty(Mac))          d["mac"]          = Mac!;
+        if (!string.IsNullOrEmpty(Disk))         d["disk"]         = Disk!;
+        return d;
+    }
+}
+
+/// <summary>
 /// Result of a single heartbeat check. <c>Valid</c> is false when an admin
 /// has terminated the device/session, the user has been banned/paused,
 /// the product expired, or the HWID was unbound. <c>Reason</c> carries a

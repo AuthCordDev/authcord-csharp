@@ -68,6 +68,7 @@ public sealed class AuthCordClient : IDisposable
         string? email = null,
         string? productId = null,
         string? hwid = null,
+        HwidComponents? hwidComponents = null,
         string? ip = null,
         string? userAgent = null,
         Dictionary<string, object>? deviceMeta = null,
@@ -87,6 +88,11 @@ public sealed class AuthCordClient : IDisposable
         if (email != null) body["email"] = email;
         if (productId != null) body["product_id"] = productId;
         if (hwid != null) body["hwid"] = hwid;
+        if (hwidComponents != null)
+        {
+            var comp = hwidComponents.ToBody();
+            if (comp.Count > 0) body["hwid_components"] = comp;
+        }
         if (ip != null) body["ip"] = ip;
         if (userAgent != null) body["user_agent"] = userAgent;
         if (deviceMeta != null) body["device_meta"] = deviceMeta;
@@ -95,6 +101,74 @@ public sealed class AuthCordClient : IDisposable
 
         return await RequestAsync<ValidationResult>(
             HttpMethod.Post, "/api/v1/auth/validate", body, cancellationToken);
+    }
+
+    /// <summary>
+    /// Best-effort collector for spoofer-resistant HWID components on
+    /// Windows. Populates <c>Sid</c>, <c>CpuId</c>, and <c>MachineGuid</c>
+    /// via Win32 + registry; returns a partial result if any source
+    /// fails. Other platforms return an empty record.
+    ///
+    /// Use the result as the <c>hwidComponents</c> argument to
+    /// <see cref="ValidateAsync"/> when your app's HWID Strategy is
+    /// STABLE or STRICT. Keep your legacy <c>hwid</c> argument too as a
+    /// back-compat fallback so users on apps still on LEGACY keep
+    /// working without an SDK upgrade.
+    /// </summary>
+    public static HwidComponents CollectHwidComponents()
+    {
+        string? sid = null, cpuId = null, machineGuid = null;
+#if WINDOWS || NET6_0_OR_GREATER
+        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+        {
+            // ── Windows User SID ──
+            try
+            {
+                using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+                sid = identity.User?.Value;
+            }
+            catch { /* swallow — leave Sid null */ }
+
+            // ── MachineGuid ──
+            try
+            {
+                using var key = Microsoft.Win32.Registry.LocalMachine
+                    .OpenSubKey(@"SOFTWARE\Microsoft\Cryptography");
+                machineGuid = key?.GetValue("MachineGuid")?.ToString();
+            }
+            catch { /* swallow */ }
+
+            // ── CPU ID (best-effort via wmic) ──
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "wmic",
+                    Arguments = "cpu get ProcessorId /value",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using var p = System.Diagnostics.Process.Start(psi);
+                if (p != null)
+                {
+                    var output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(3000);
+                    foreach (var line in output.Split('\n'))
+                    {
+                        var trimmed = line.Trim();
+                        if (trimmed.StartsWith("ProcessorId=", System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            var val = trimmed.Substring("ProcessorId=".Length).Trim();
+                            if (!string.IsNullOrEmpty(val)) { cpuId = val; break; }
+                        }
+                    }
+                }
+            }
+            catch { /* swallow */ }
+        }
+#endif
+        return new HwidComponents { Sid = sid, CpuId = cpuId, MachineGuid = machineGuid };
     }
 
     /// <summary>
@@ -184,18 +258,22 @@ public sealed class AuthCordClient : IDisposable
         string appId,
         string? discordId = null,
         string? hwid = null,
+        HwidComponents? hwidComponents = null,
         string? sessionToken = null,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(sessionToken) && (string.IsNullOrEmpty(discordId) || string.IsNullOrEmpty(hwid)))
+        var componentsBody = hwidComponents?.ToBody();
+        var hasHwidSignal = !string.IsNullOrEmpty(hwid) || (componentsBody != null && componentsBody.Count > 0);
+        if (string.IsNullOrEmpty(sessionToken) && (string.IsNullOrEmpty(discordId) || !hasHwidSignal))
         {
-            throw new ArgumentException("Provide sessionToken, or both discordId and hwid");
+            throw new ArgumentException("Provide sessionToken, or discordId with hwid or hwidComponents");
         }
 
         var body = new Dictionary<string, object> { ["app_id"] = appId };
         if (!string.IsNullOrEmpty(sessionToken)) body["session_token"] = sessionToken;
         if (!string.IsNullOrEmpty(discordId)) body["discord_id"] = discordId;
         if (!string.IsNullOrEmpty(hwid)) body["hwid"] = hwid;
+        if (componentsBody != null && componentsBody.Count > 0) body["hwid_components"] = componentsBody;
 
         return await RequestAsync<HeartbeatResult>(
             HttpMethod.Post, "/api/v1/auth/heartbeat", body, cancellationToken);
@@ -222,14 +300,17 @@ public sealed class AuthCordClient : IDisposable
         Func<HeartbeatResult, Task> onTerminated,
         string? discordId = null,
         string? hwid = null,
+        HwidComponents? hwidComponents = null,
         string? sessionToken = null,
         int? intervalSeconds = null,
         Func<Exception, Task>? onError = null,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(sessionToken) && (string.IsNullOrEmpty(discordId) || string.IsNullOrEmpty(hwid)))
+        var componentsBody = hwidComponents?.ToBody();
+        var hasHwidSignal = !string.IsNullOrEmpty(hwid) || (componentsBody != null && componentsBody.Count > 0);
+        if (string.IsNullOrEmpty(sessionToken) && (string.IsNullOrEmpty(discordId) || !hasHwidSignal))
         {
-            throw new ArgumentException("Provide sessionToken, or both discordId and hwid");
+            throw new ArgumentException("Provide sessionToken, or discordId with hwid or hwidComponents");
         }
 
         return Task.Run(async () =>
@@ -248,7 +329,7 @@ public sealed class AuthCordClient : IDisposable
                 HeartbeatResult result;
                 try
                 {
-                    result = await HeartbeatAsync(appId, discordId, hwid, sessionToken, cancellationToken);
+                    result = await HeartbeatAsync(appId, discordId, hwid, hwidComponents, sessionToken, cancellationToken);
                 }
                 catch (OperationCanceledException)
                 {
