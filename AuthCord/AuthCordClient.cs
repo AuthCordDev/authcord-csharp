@@ -435,6 +435,107 @@ public sealed class AuthCordClient : IDisposable
             HttpMethod.Get, path, null, cancellationToken);
     }
 
+    // ------------------------------------------------------------------
+    // Admin operations — server-side only, require a FULL API key.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Pause (freeze the expiry clock) one product — or every product the user
+    /// owns on the app when <paramref name="productId"/> is null — for
+    /// <paramref name="days"/> days.
+    /// <para><b>Server-side only. Requires a FULL API key</b> (a CLIENT key gets 403).</para>
+    /// Does not throw on the expected 404 cases (app/user/product not found, user
+    /// owns nothing) or the 409 already-paused case — inspect
+    /// <see cref="PauseResult.Success"/>, <c>Error</c> and <c>Reason</c>. Auth (401),
+    /// rate-limit (429), network and server (5xx) errors still throw.
+    /// </summary>
+    public async Task<PauseResult> PauseProductAsync(
+        string appId,
+        string discordId,
+        int days,
+        string? productId = null,
+        string? reason = null,
+        string? pausedBy = null,
+        CancellationToken cancellationToken = default)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["app_id"] = appId,
+            ["discord_id"] = discordId,
+            ["days"] = days
+        };
+        if (productId != null) body["product_id"] = productId;
+        if (reason != null) body["reason"] = reason;
+        if (pausedBy != null) body["paused_by"] = pausedBy;
+
+        var (status, data) = await RequestRawAsync<PauseResult>(
+            HttpMethod.Post, "/api/v1/products/pause", body, cancellationToken);
+        return data with { Status = status };
+    }
+
+    /// <summary>
+    /// Unpause one product — or every paused product on the app when
+    /// <paramref name="productId"/> is null. Idempotent.
+    /// <para><b>Requires a FULL API key.</b></para>
+    /// Same error semantics as <see cref="PauseProductAsync"/>.
+    /// </summary>
+    public async Task<UnpauseResult> UnpauseProductAsync(
+        string appId,
+        string discordId,
+        string? productId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["app_id"] = appId,
+            ["discord_id"] = discordId
+        };
+        if (productId != null) body["product_id"] = productId;
+
+        var (status, data) = await RequestRawAsync<UnpauseResult>(
+            HttpMethod.Post, "/api/v1/products/unpause", body, cancellationToken);
+        return data with { Status = status };
+    }
+
+    /// <summary>
+    /// Clear the HWID binding(s) for a user on one product — or every product
+    /// the user owns on the app when <paramref name="productId"/> is null — so
+    /// they can re-bind on a new machine. Idempotent for unbound products.
+    /// <para>The app's HWID reset cooldown applies (same rule as dashboard and
+    /// self-service resets): blocked products are skipped with
+    /// <c>on_cooldown: true</c>, and the call returns 409 <c>cooldown_active</c>
+    /// when every target was blocked. Pass <paramref name="bypassCooldown"/>
+    /// for an explicit admin override. Pass <paramref name="hwid"/> (with
+    /// <paramref name="productId"/>) to clear a single device slot.</para>
+    /// <para><b>Requires a FULL API key</b>; scoped keys need the
+    /// <c>devices:reset</c> scope. Resets are attributed to the calling key
+    /// in the reset and audit logs.</para>
+    /// Same error semantics as <see cref="PauseProductAsync"/>.
+    /// </summary>
+    public async Task<ResetHwidResult> ResetHwidAsync(
+        string appId,
+        string discordId,
+        string? productId = null,
+        string? hwid = null,
+        bool bypassCooldown = false,
+        string? reason = null,
+        CancellationToken cancellationToken = default)
+    {
+        var body = new Dictionary<string, object>
+        {
+            ["app_id"] = appId,
+            ["discord_id"] = discordId
+        };
+        if (productId != null) body["product_id"] = productId;
+        if (hwid != null) body["hwid"] = hwid;
+        if (bypassCooldown) body["bypass_cooldown"] = true;
+        if (reason != null) body["reason"] = reason;
+
+        var (status, data) = await RequestRawAsync<ResetHwidResult>(
+            HttpMethod.Post, "/api/v1/products/reset-hwid", body, cancellationToken);
+        return data with { Status = status };
+    }
+
     /// <summary>
     /// Sends an HTTP request, deserializes the response, and handles errors.
     /// </summary>
@@ -504,6 +605,84 @@ public sealed class AuthCordClient : IDisposable
         {
             return JsonSerializer.Deserialize<T>(responseBody, _jsonOptions)
                 ?? throw new AuthCordException("Failed to deserialize response.");
+        }
+        catch (JsonException ex)
+        {
+            throw new AuthCordException($"Failed to parse response: {ex.Message}", 0, ex);
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="RequestAsync{T}"/>, but for admin endpoints whose 404/409
+    /// responses carry a meaningful JSON body ({ success, error, reason }).
+    /// Returns the parsed body plus status instead of throwing on those. Still
+    /// throws on network, auth (401), rate-limit (429) and server (5xx) errors.
+    /// </summary>
+    private async Task<(int Status, T Data)> RequestRawAsync<T>(
+        HttpMethod method,
+        string path,
+        object? body,
+        CancellationToken cancellationToken) where T : new()
+    {
+        var url = $"{_baseUrl}{path}";
+
+        using var request = new HttpRequestMessage(method, url);
+
+        if (body != null)
+        {
+            var json = JsonSerializer.Serialize(body, _jsonOptions);
+            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        }
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new AuthCordException("Request timed out.", 0, ex);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new AuthCordException($"Network error: {ex.Message}", 0, ex);
+        }
+
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        var statusCode = (int)response.StatusCode;
+
+        if (statusCode == 401 || statusCode == 429 || statusCode >= 500)
+        {
+            var errorMessage = $"HTTP {statusCode}";
+            try
+            {
+                using var doc = JsonDocument.Parse(responseBody);
+                if (doc.RootElement.TryGetProperty("message", out var msgProp))
+                    errorMessage = msgProp.GetString() ?? errorMessage;
+                else if (doc.RootElement.TryGetProperty("error", out var errProp))
+                    errorMessage = errProp.GetString() ?? errorMessage;
+            }
+            catch (JsonException)
+            {
+                // Use default error message
+            }
+
+            throw statusCode switch
+            {
+                401 => new AuthenticationException(errorMessage),
+                429 => new RateLimitException(
+                    errorMessage,
+                    response.Headers.TryGetValues("Retry-After", out var values)
+                        ? TimeSpan.FromSeconds(int.TryParse(values.FirstOrDefault(), out var s) ? s : 60)
+                        : null),
+                _ => new ApiException(errorMessage, statusCode)
+            };
+        }
+
+        try
+        {
+            var data = JsonSerializer.Deserialize<T>(responseBody, _jsonOptions) ?? new T();
+            return (statusCode, data);
         }
         catch (JsonException ex)
         {

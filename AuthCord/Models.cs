@@ -307,3 +307,126 @@ internal sealed record RevokeResponse
     [JsonPropertyName("count")]
     public int Count { get; init; }
 }
+
+// ---------------------------------------------------------------------------
+// Admin operation results (server-side, FULL API key only)
+//
+// Success is false for the expected 404 cases (carrying a machine Error code +
+// human Reason) and the 409 already-paused case. Check it before reading data.
+// ---------------------------------------------------------------------------
+
+/// <summary>A product paused by <c>PauseProductAsync</c>.</summary>
+public sealed record PausedProduct
+{
+    [JsonPropertyName("product_id")]
+    public string ProductId { get; init; } = "";
+
+    [JsonPropertyName("paused_at")]
+    public string? PausedAt { get; init; }
+
+    [JsonPropertyName("pause_ends_at")]
+    public string? PauseEndsAt { get; init; }
+
+    [JsonPropertyName("frozen_expires_at")]
+    public string? FrozenExpiresAt { get; init; }
+}
+
+/// <summary>
+/// Result of a <c>PauseProductAsync</c> call. <see cref="Success"/> is false
+/// for the 404 cases (machine <see cref="Error"/> + human <see cref="Reason"/>)
+/// and the 409 already-paused case (Error = "already_paused" + Message).
+/// </summary>
+public sealed record PauseResult
+{
+    [JsonPropertyName("success")]
+    public bool Success { get; init; }
+
+    /// <summary>HTTP status code of the response (not part of the JSON body).</summary>
+    [JsonIgnore]
+    public int Status { get; init; }
+
+    [JsonPropertyName("paused")]
+    public List<PausedProduct> Paused { get; init; } = new();
+
+    [JsonPropertyName("error")]
+    public string? Error { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
+}
+
+/// <summary>A product unpaused by <c>UnpauseProductAsync</c>.</summary>
+public sealed record UnpausedProduct
+{
+    [JsonPropertyName("product_id")]
+    public string ProductId { get; init; } = "";
+
+    [JsonPropertyName("new_expires_at")]
+    public string? NewExpiresAt { get; init; }
+}
+
+/// <summary>Result of an <c>UnpauseProductAsync</c> call.</summary>
+public sealed record UnpauseResult
+{
+    [JsonPropertyName("success")]
+    public bool Success { get; init; }
+
+    /// <summary>HTTP status code of the response (not part of the JSON body).</summary>
+    [JsonIgnore]
+    public int Status { get; init; }
+
+    [JsonPropertyName("unpaused")]
+    public List<UnpausedProduct> Unpaused { get; init; } = new();
+
+    [JsonPropertyName("error")]
+    public string? Error { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+}
+
+/// <summary>Per-product HWID clear count from <c>ResetHwidAsync</c>.</summary>
+public sealed record HwidResetEntry
+{
+    [JsonPropertyName("product_id")]
+    public string ProductId { get; init; } = "";
+
+    /// <summary>Bindings cleared. Idempotent: nothing bound reports 0.</summary>
+    [JsonPropertyName("cleared_hwids")]
+    public int ClearedHwids { get; init; }
+
+    /// <summary>True when this product was skipped because it is still inside its reset cooldown.</summary>
+    [JsonPropertyName("on_cooldown")]
+    public bool OnCooldown { get; init; }
+
+    /// <summary>When this product's reset cooldown ends (set when <see cref="OnCooldown"/> is true).</summary>
+    [JsonPropertyName("cooldown_ends_at")]
+    public DateTimeOffset? CooldownEndsAt { get; init; }
+}
+
+/// <summary>Result of a <c>ResetHwidAsync</c> call.</summary>
+public sealed record ResetHwidResult
+{
+    [JsonPropertyName("success")]
+    public bool Success { get; init; }
+
+    /// <summary>HTTP status code of the response (not part of the JSON body).</summary>
+    [JsonIgnore]
+    public int Status { get; init; }
+
+    [JsonPropertyName("reset")]
+    public List<HwidResetEntry> Reset { get; init; } = new();
+
+    /// <summary>Soonest cooldown end among blocked products (409 <c>cooldown_active</c> only).</summary>
+    [JsonPropertyName("cooldown_ends_at")]
+    public DateTimeOffset? CooldownEndsAt { get; init; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+}

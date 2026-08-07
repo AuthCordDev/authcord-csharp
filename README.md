@@ -116,3 +116,34 @@ catch (ApiException ex)
     Console.WriteLine($"API error ({ex.StatusCode}): {ex.Message}");
 }
 ```
+
+## Admin Operations (server-side, FULL key only)
+
+`PauseProductAsync`, `UnpauseProductAsync` and `ResetHwidAsync` mutate user state
+and require a **FULL** API key (a CLIENT key is rejected with 403). They do
+**not** throw on the expected "not found" cases — inspect `Success`, `Error` (a
+machine code) and `Reason` (a human string). Pass `productId: null` to apply to
+every product the user owns on the app.
+
+`ResetHwidAsync` respects the app's HWID reset cooldown (blocked products are
+skipped with `OnCooldown = true`; 409 `cooldown_active` when every target was
+blocked). Pass `bypassCooldown: true` for an admin override, `hwid:` to clear
+one device slot, and `reason:` for the reset log. Scoped API keys need the
+`devices:reset` scope; resets are attributed to the calling key.
+
+```csharp
+var res = await client.PauseProductAsync(
+    "app_id", "discord_id", days: 7,
+    reason: "chargeback hold", pausedBy: "discord:999");
+
+if (res.Success)
+    Console.WriteLine($"Paused {res.Paused.Count} product(s)");
+else if (res.Error == "user_not_found")
+    Console.WriteLine($"Not on AuthCord yet: {res.Reason}"); // pre-cutover case
+else
+    Console.WriteLine($"{res.Status} {res.Error}: {res.Reason}");
+
+await client.UnpauseProductAsync("app_id", "discord_id"); // all products
+await client.ResetHwidAsync("app_id", "discord_id");       // cooldown-gated, idempotent
+await client.ResetHwidAsync("app_id", "discord_id", bypassCooldown: true, reason: "ticket #123");
+```
